@@ -1237,8 +1237,12 @@ bool targetter_shotgun::set_aim(coord_def a)
 {
     zapped.clear();
 
-    if (!targetter::set_aim(a))
-        return false;
+    if (agent->is_player())
+    {
+        if (!targetter::set_aim(a))
+            return false;
+    } else
+        aim = a;
 
     ray_def orig_ray;
     _make_ray(orig_ray, origin, a);
