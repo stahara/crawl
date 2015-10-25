@@ -1,0 +1,3 @@
+#cmakedefine CRAWL_HAVE_FDATASYNC
+#cmakedefine CRAWL_HAVE_STRLCPY
+#cmakedefine CRAWL_HAVE_MKSTEMP
