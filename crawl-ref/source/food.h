@@ -7,6 +7,7 @@
 #define FOOD_H
 
 #include "mon-enum.h"
+#include "foodpool.h"
 
 #define BERSERK_NUTRITION     700
 
@@ -23,7 +24,18 @@
 #define HUNGER_DEFAULT       5900
 #define HUNGER_MAXIMUM      11900
 
-bool eat_food(int slot = -1);
+enum eat_food_type {
+    EAT_FOOD_SLOW,  // High duration/amount/efficiency.
+    EAT_FOOD_FAST,  // Low duration/amount/efficiency.
+    EAT_FOOD_UNSPECIFIED,
+};
+
+enum {
+    EAT_SLOW_VALUE = 5000,
+    EAT_SLOW_TURNS = 3,
+    EAT_FAST_VALUE = 1000,
+    EAT_FAST_TURNS = 1,
+};
 
 void make_hungry(int hunger_amount, bool suppress_msg, bool magic = false);
 
@@ -51,7 +63,7 @@ int prompt_eat_chunks(bool only_auto = false);
 
 bool food_change(bool initial = false);
 
-bool prompt_eat_inventory_item(int slot = -1);
+bool eat_food(eat_food_type rate = EAT_FOOD_UNSPECIFIED);
 
 void chunk_nutrition_message(int nutrition);
 

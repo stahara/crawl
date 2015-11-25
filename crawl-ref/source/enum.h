@@ -833,6 +833,7 @@ enum canned_message_type
     MSG_GHOSTLY_OUTLINE,
     MSG_GAIN_HEALTH,
     MSG_GAIN_MAGIC,
+    MSG_NO_FOOD,
 };
 
 enum char_set_type

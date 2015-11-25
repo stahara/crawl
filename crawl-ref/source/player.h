@@ -14,6 +14,7 @@
 #include "actor.h"
 #include "beam.h"
 #include "bitary.h"
+#include "foodpool.h"
 #include "kills.h"
 #include "place-info.h"
 #include "quiver.h"
@@ -109,6 +110,7 @@ public:
   FixedVector<int8_t, NUM_STATS> stat_loss;
   FixedVector<int8_t, NUM_STATS> base_stats;
 
+  foodpool food;
   int hunger;
   int disease;
   hunger_state_t hunger_state;

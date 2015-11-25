@@ -40,7 +40,7 @@
 static void _eat_chunk(item_def& food);
 static void _eating(item_def &food);
 static void _describe_food_change(int hunger_increment);
-static bool _vampire_consume_corpse(int slot, bool invent);
+static bool _vampire_feed();
 static void _heal_from_food(int hp_amt);
 
 void make_hungry(int hunger_amount, bool suppress_msg,
@@ -157,47 +157,6 @@ bool you_foodless_normally()
         ;
 }
 
-bool prompt_eat_inventory_item(int slot)
-{
-    // There's nothing in inventory that a vampire can 'e'.
-    if (you.species == SP_VAMPIRE)
-        return false;
-
-    if (inv_count() < 1)
-    {
-        canned_msg(MSG_NOTHING_CARRIED);
-        return false;
-    }
-
-    int which_inventory_slot = slot;
-
-    if (slot == -1)
-    {
-        which_inventory_slot = prompt_invent_item("Eat which item?",
-                                                  MT_INVLIST, OBJ_FOOD,
-                                                  true, true, true, 0, -1,
-                                                  nullptr, OPER_EAT);
-
-        if (prompt_failed(which_inventory_slot))
-            return false;
-    }
-
-    item_def &item(you.inv[which_inventory_slot]);
-    if (item.base_type != OBJ_FOOD)
-    {
-        mpr("You can't eat that!");
-        return false;
-    }
-
-    if (!can_eat(item, false))
-        return false;
-
-    eat_item(item);
-    you.turn_is_over = true;
-
-    return true;
-}
-
 static bool _eat_check(bool check_hunger = true, bool silent = false)
 {
     if (you_foodless(true))
@@ -226,36 +185,129 @@ static bool _eat_check(bool check_hunger = true, bool silent = false)
     return true;
 }
 
-// [ds] Returns true if something was eaten.
-bool eat_food(int slot)
+
+/** Feed from a corpse on the ground.
+ *
+ *  @returns true for did feed, false for did not feed.
+ */
+bool vampire_feed()
 {
+    if (you.species != SP_VAMPIRE)
+        return false;
+
+    item_def *corpse = nullptr;
+
+    for (stack_iterator si(you.pos(), true); !corpse; ++si)
+    {
+        if (si->base_type == OBJ_CORPSES && si->sub_type == CORPSE_BODY)
+            corpse = &(*si);
+
+        if (mons_has_blood(si->mon_type))
+            break;
+    }
+
+    if (!mons_has_blood(corpse->mon_type))
+    {
+        mpr("There is no blood in this body!");
+        return false;
+    }
+
+    if (!corpse)
+        return false;
+
+
+    const bool easy_eat = Options.easy_eat_chunks;
+    string corpse_name = get_menu_colour_prefix_tags(*corpse, DESC_A);
+
+    mprf(MSGCH_PROMPT, "Drink blood from %s? (ye/n/q)", corpse_name.c_str());
+
+    int keyin = easy_eat ? 'y' : toalower(getchm(KMC_CONFIRM));
+    switch (keyin)
+    {
+    case 'e':
+    case 'y':
+        if (can_eat(*corpse, false))
+        {
+            if (easy_eat && i_feel_safe())
+                mprf("Drinking blood from %s.", corpse_name.c_str());
+        }
+        break;
+    case 'q':
+    CASE_ESCAPE
+        canned_msg(MSG_OK);
+        return false;
+    }
+
+    ASSERT(corpse->base_type == OBJ_CORPSES);
+    ASSERT(corpse->sub_type == CORPSE_BODY);
+
+
+    // The delay for eating a chunk (mass 1000) is 2
+    // Here the base nutrition value equals that of chunks,
+    // but the delay should be smaller.
+    const int max_chunks = max_corpse_chunks(corpse->mon_type);
+    int duration = 1 + max_chunks / 3;
+    duration = stepdown_value(duration, 6, 6, 12, 12);
+
+    // Get some nutrition right away, in case we're interrupted.
+    // (-1 for the starting message.)
+    vampire_nutrition_per_turn(*corpse, -1);
+
+    // The draining delay doesn't have a start action, and we only need
+    // the continue/finish messages if it takes longer than 1 turn.
+    start_delay(DELAY_FEED_VAMPIRE, duration);
+
+    return true;
+}
+
+bool eat_food(eat_food_type rate)
+{
+    // Vampires feed directly from corpses.
+    if (you.species == SP_VAMPIRE)
+        return _vampire_feed();
+
+    if (you.total_food() == 0)
+    {
+        canned_msg(MSG_NO_FOOD);
+        return false;
+    }
+
     if (!_eat_check())
         return false;
 
-    // Skip the prompts if we already know what we're eating.
-    if (slot == -1)
+    if (rate == EAT_FOOD_UNSPECIFIED)
     {
-        int result = prompt_eat_chunks();
-        if (result == 1 || result == -1)
-            return result > 0;
-
-        if (result != -2) // else skip ahead to inventory
+        mprf(MSGCH_PROMPT, "<w>(S)</w>nack or <w>(D)</w>ine? (<w>Esc</w> aborts.)");
+        int keyin = toalower(getchm(KMC_MENU));
+        switch (keyin)
         {
-            if (you.visible_igrd(you.pos()) != NON_ITEM)
-            {
-                result = eat_from_floor(true);
-                if (result == 1)
-                    return true;
-                if (result == -1)
-                    return false;
-            }
+        case 's':
+            rate = EAT_FOOD_FAST;
+            break;
+        case 'd':
+            rate = EAT_FOOD_SLOW;
+            break;
+        CASE_ESCAPE
+        default:
+            canned_msg(MSG_OK);
+            return false;
         }
     }
 
-    if (you.species == SP_VAMPIRE)
-        mpr("There's nothing here to drain!");
+    int food_value = rate == EAT_FOOD_SLOW ? EAT_SLOW_VALUE : EAT_FAST_VALUE;
+    int duration   = rate == EAT_FOOD_SLOW ? EAT_SLOW_TURNS : EAT_FAST_TURNS;
 
-    return prompt_eat_inventory_item(slot);
+    // use delay.parm3 to figure out whether to output "finish eating"
+    zin_recite_interrupt();
+    start_delay(DELAY_EAT, duration, 0, rate, duration - 1);
+
+    lessen_hunger(food_value, true);
+
+    you.turn_is_over = true;
+
+    count_action(CACT_EAT, rate);
+
+    return true;
 }
 
 static string _how_hungry()
@@ -415,454 +467,12 @@ static void _describe_food_change(int food_increment)
     mpr(msg);
 }
 
-bool eat_item(item_def &food)
-{
-    int link;
-
-    if (in_inventory(food))
-        link = food.link;
-    else
-    {
-        link = item_on_floor(food, you.pos());
-        if (link == NON_ITEM)
-            return false;
-    }
-
-    if (food.is_type(OBJ_CORPSES, CORPSE_BODY))
-    {
-        if (you.species != SP_VAMPIRE)
-            return false;
-
-        if (_vampire_consume_corpse(link, in_inventory(food)))
-        {
-            count_action(CACT_EAT, -1);
-            you.turn_is_over = true;
-            return true;
-        }
-        else
-            return false;
-    }
-    else if (food.sub_type == FOOD_CHUNK)
-        _eat_chunk(food);
-    else
-        _eating(food);
-
-    you.turn_is_over = true;
-
-    count_action(CACT_EAT, food.sub_type);
-    if (is_perishable_stack(food)) // chunks
-        remove_oldest_perishable_item(food);
-    if (in_inventory(food))
-        dec_inv_item_quantity(link, 1);
-    else
-        dec_mitm_item_quantity(link, 1);
-
-    return true;
-}
-
-// Returns which of two food items is older (true for first, else false).
-static bool _compare_by_freshness(const item_def *food1, const item_def *food2)
-{
-    ASSERT(food1->base_type == OBJ_CORPSES || food1->base_type == OBJ_FOOD);
-    ASSERT(food2->base_type == OBJ_CORPSES || food2->base_type == OBJ_FOOD);
-    ASSERT(food1->base_type == food2->base_type);
-
-    if (is_inedible(*food1))
-        return false;
-
-    if (is_inedible(*food2))
-        return true;
-
-    // Permafood can last longest, skip it if possible.
-    if (food1->base_type == OBJ_FOOD && food1->sub_type != FOOD_CHUNK)
-        return false;
-    if (food2->base_type == OBJ_FOOD && food2->sub_type != FOOD_CHUNK)
-        return true;
-
-    // At this point, we know both are corpses or chunks, edible
-
-    // Always offer poisonous/mutagenic chunks last.
-    if (is_bad_food(*food1) && !is_bad_food(*food2))
-        return false;
-    if (is_bad_food(*food2) && !is_bad_food(*food1))
-        return true;
-
-    return food1->special < food2->special;
-}
-
 #ifdef TOUCH_UI
 static string _floor_eat_menu_title(const Menu *menu, const string &oldt)
 {
     return oldt;
 }
 #endif
-
-// Returns -1 for cancel, 1 for eaten, 0 for not eaten.
-int eat_from_floor(bool skip_chunks)
-{
-    if (!_eat_check())
-        return false;
-
-    // Corpses should have been handled before.
-    if (you.species == SP_VAMPIRE)
-        return 0;
-
-    bool need_more = false;
-    int inedible_food = 0;
-    item_def wonteat;
-    bool found_valid = false;
-
-#ifdef TOUCH_UI
-    vector<const item_def*> food_items;
-#else
-    vector<item_def*> food_items;
-#endif
-    for (stack_iterator si(you.pos(), true); si; ++si)
-    {
-        if (si->base_type != OBJ_FOOD)
-            continue;
-
-        // Chunks should have been handled before.
-        if (skip_chunks && si->sub_type == FOOD_CHUNK)
-            continue;
-
-        if (is_bad_food(*si))
-            continue;
-
-        if (!can_eat(*si, true))
-        {
-            if (!inedible_food)
-            {
-                wonteat = *si;
-                inedible_food++;
-            }
-            else
-            {
-                // Increase only if we're dealing with different subtypes.
-                // FIXME: Use a common check for herbivorous/carnivorous
-                //        dislikes, for e.g. "Blech! You need blood!"
-                ASSERT(wonteat.defined());
-                if (wonteat.sub_type != si->sub_type)
-                    inedible_food++;
-            }
-
-            continue;
-        }
-
-        found_valid = true;
-        food_items.push_back(&(*si));
-    }
-
-    if (found_valid)
-    {
-#ifdef TOUCH_UI
-        redraw_screen();
-        for (SelItem &sel : select_items(food_items, "Eat", false, MT_SELONE,
-                                         _floor_eat_menu_title))
-        {
-            item_def *item = const_cast<item_def *>(sel.item);
-            if (!check_warning_inscriptions(*item, OPER_EAT))
-                break;
-
-            if (can_eat(*item, false))
-                return eat_item(*item);
-        }
-#else
-        sort(food_items.begin(), food_items.end(), _compare_by_freshness);
-        for (item_def *item : food_items)
-        {
-            string item_name = get_menu_colour_prefix_tags(*item, DESC_A);
-
-            mprf(MSGCH_PROMPT, "%s %s%s? (ye/n/q/i?)",
-                 "Eat",
-                 ((item->quantity > 1) ? "one of " : ""),
-                 item_name.c_str());
-
-            int keyin = toalower(getchm(KMC_CONFIRM));
-            switch (keyin)
-            {
-            case 'q':
-            CASE_ESCAPE
-                canned_msg(MSG_OK);
-                return -1;
-            case 'e':
-            case 'y':
-                if (!check_warning_inscriptions(*item, OPER_EAT))
-                    break;
-
-                if (can_eat(*item, false))
-                    return eat_item(*item);
-                need_more = true;
-                break;
-            case 'i':
-            case '?':
-                // Directly skip ahead to inventory.
-                return 0;
-            default:
-                // Else no: try next one.
-                break;
-            }
-        }
-#endif
-    }
-    else if (inedible_food)
-    {
-        if (inedible_food == 1)
-        {
-            ASSERT(wonteat.defined());
-            // Use the normal cannot ingest message.
-            if (can_eat(wonteat, false))
-            {
-                mprf(MSGCH_DIAGNOSTICS, "Error: Can eat %s after all?",
-                     wonteat.name(DESC_PLAIN).c_str());
-            }
-        }
-        else // Several different food items.
-            mpr("You refuse to eat these food items.");
-        need_more = true;
-    }
-
-    if (need_more)
-        more();
-
-    return 0;
-}
-
-bool eat_from_inventory()
-{
-    if (!_eat_check())
-        return false;
-
-    // Corpses should have been handled before.
-    if (you.species == SP_VAMPIRE)
-        return 0;
-
-    int inedible_food = 0;
-    item_def *wonteat = nullptr;
-    bool found_valid = false;
-
-    vector<item_def *> food_items;
-    for (auto &item : you.inv)
-    {
-        if (!item.defined())
-            continue;
-
-        // Chunks should have been handled before.
-        if (item.base_type != OBJ_FOOD || item.sub_type == FOOD_CHUNK)
-            continue;
-
-        if (is_bad_food(item))
-            continue;
-
-        if (!can_eat(item, true))
-        {
-            if (!inedible_food)
-            {
-                wonteat = &item;
-                inedible_food++;
-            }
-            else
-            {
-                // Increase only if we're dealing with different subtypes.
-                // FIXME: Use a common check for herbivorous/carnivorous
-                //        dislikes, for e.g. "Blech! You need blood!"
-                ASSERT(wonteat->defined());
-                if (wonteat->sub_type != item.sub_type)
-                    inedible_food++;
-            }
-            continue;
-        }
-
-        found_valid = true;
-        food_items.push_back(&item);
-    }
-
-    if (found_valid)
-    {
-        sort(food_items.begin(), food_items.end(), _compare_by_freshness);
-        for (item_def *item : food_items)
-        {
-            string item_name = get_menu_colour_prefix_tags(*item, DESC_A);
-
-            mprf(MSGCH_PROMPT, "%s %s%s? (ye/n/q)",
-                 "Eat",
-                 ((item->quantity > 1) ? "one of " : ""),
-                 item_name.c_str());
-
-            int keyin = toalower(getchm(KMC_CONFIRM));
-            switch (keyin)
-            {
-            case 'q':
-            CASE_ESCAPE
-                canned_msg(MSG_OK);
-                return false;
-            case 'e':
-            case 'y':
-                if (can_eat(*item, false))
-                    return eat_item(*item);
-                break;
-            default:
-                // Else no: try next one.
-                break;
-            }
-        }
-    }
-    else if (inedible_food)
-    {
-        if (inedible_food == 1)
-        {
-            ASSERT(wonteat->defined());
-            // Use the normal cannot ingest message.
-            if (can_eat(*wonteat, false))
-            {
-                mprf(MSGCH_DIAGNOSTICS, "Error: Can eat %s after all?",
-                    wonteat->name(DESC_PLAIN).c_str());
-            }
-        }
-        else // Several different food items.
-            mpr("You refuse to eat these food items.");
-    }
-
-    return false;
-}
-
-
-/** Make the prompt for chunk eating/corpse draining.
- *
- *  @param only_auto Don't actually make a prompt: if there are
- *                   things to auto_eat, eat them, and exit otherwise.
- *  @returns -1 for cancel, 1 for eaten, 0 for not eaten,
- *           -2 for skip to inventory.
- */
-int prompt_eat_chunks(bool only_auto)
-{
-    // Full herbivores cannot eat chunks.
-    if (player_mutation_level(MUT_HERBIVOROUS) == 3)
-        return 0;
-
-    // If we *know* the player can eat chunks, doesn't have the gourmand
-    // effect and isn't hungry, don't prompt for chunks.
-    if (you.species != SP_VAMPIRE
-        && you.hunger_state >= HS_SATIATED + player_likes_chunks())
-    {
-        return 0;
-    }
-
-    bool found_valid = false;
-    vector<item_def *> chunks;
-
-    for (stack_iterator si(you.pos(), true); si; ++si)
-    {
-        if (you.species == SP_VAMPIRE)
-        {
-            if (si->base_type != OBJ_CORPSES || si->sub_type != CORPSE_BODY)
-                continue;
-
-            if (!mons_has_blood(si->mon_type))
-                continue;
-        }
-        else if (si->base_type != OBJ_FOOD
-                 || si->sub_type != FOOD_CHUNK
-                 || is_bad_food(*si))
-        {
-            continue;
-        }
-
-        found_valid = true;
-        chunks.push_back(&(*si));
-    }
-
-    // Then search through the inventory.
-    for (auto &item : you.inv)
-    {
-        if (!item.defined())
-            continue;
-
-        // Vampires can't eat anything in their inventory.
-        if (you.species == SP_VAMPIRE)
-            continue;
-
-        if (item.base_type != OBJ_FOOD || item.sub_type != FOOD_CHUNK)
-            continue;
-
-        // Don't prompt for bad food types.
-        if (is_bad_food(item))
-            continue;
-
-        found_valid = true;
-        chunks.push_back(&item);
-    }
-
-    const bool easy_eat = Options.easy_eat_chunks || only_auto;
-
-    if (found_valid)
-    {
-        sort(chunks.begin(), chunks.end(), _compare_by_freshness);
-        for (item_def *item : chunks)
-        {
-            bool autoeat = false;
-            string item_name = get_menu_colour_prefix_tags(*item, DESC_A);
-
-            const bool bad = is_bad_food(*item);
-
-            // Allow undead to use easy_eat, but not auto_eat, since the player
-            // might not want to drink blood as a vampire and might want to save
-            // chunks as a ghoul.
-            if (easy_eat && !bad && i_feel_safe() && !(only_auto &&
-                                                       you.undead_state()))
-            {
-                // If this chunk is safe to eat, just do so without prompting.
-                autoeat = true;
-            }
-            else if (only_auto)
-                return 0;
-            else
-            {
-                mprf(MSGCH_PROMPT, "%s %s%s? (ye/n/q/i?)",
-                     (you.species == SP_VAMPIRE ? "Drink blood from" : "Eat"),
-                     ((item->quantity > 1) ? "one of " : ""),
-                     item_name.c_str());
-            }
-
-            int keyin = autoeat ? 'y' : toalower(getchm(KMC_CONFIRM));
-            switch (keyin)
-            {
-            case 'q':
-            CASE_ESCAPE
-                canned_msg(MSG_OK);
-                return -1;
-            case 'i':
-            case '?':
-                // Skip ahead to the inventory.
-                return -2;
-            case 'e':
-            case 'y':
-                if (can_eat(*item, false))
-                {
-                    if (autoeat)
-                    {
-                        mprf("%s %s%s.",
-                             (you.species == SP_VAMPIRE ? "Drinking blood from"
-                                                        : "Eating"),
-                             ((item->quantity > 1) ? "one of " : ""),
-                             item_name.c_str());
-                    }
-
-                    if (eat_item(*item))
-                        return 1;
-                    else
-                        return 0;
-                }
-                break;
-            default:
-                // Else no: try next one.
-                break;
-            }
-        }
-    }
-
-    return 0;
-}
 
 static const char *_chunk_flavour_phrase(bool likes_chunks)
 {
@@ -1010,19 +620,6 @@ static void _eat_chunk(item_def& food)
     }
 }
 
-static void _eating(item_def& food)
-{
-    int food_value = ::food_value(food);
-    ASSERT(food_value > 0);
-
-    int duration = food_turns(food) - 1;
-
-    // use delay.parm3 to figure out whether to output "finish eating"
-    zin_recite_interrupt();
-    start_delay(DELAY_EAT, duration, 0, food.sub_type, duration);
-
-    lessen_hunger(food_value, true);
-}
 
 // Handle messaging at the end of eating.
 // Some food types may not get a message.
@@ -1395,40 +992,6 @@ corpse_effect_type determine_chunk_effect(corpse_effect_type chunktype)
     }
 
     return chunktype;
-}
-
-static bool _vampire_consume_corpse(int slot, bool invent)
-{
-    ASSERT(you.species == SP_VAMPIRE);
-
-    item_def &corpse = (invent ? you.inv[slot]
-                               : mitm[slot]);
-
-    ASSERT(corpse.base_type == OBJ_CORPSES);
-    ASSERT(corpse.sub_type == CORPSE_BODY);
-
-    if (!mons_has_blood(corpse.mon_type))
-    {
-        mpr("There is no blood in this body!");
-        return false;
-    }
-
-    // The delay for eating a chunk (mass 1000) is 2
-    // Here the base nutrition value equals that of chunks,
-    // but the delay should be smaller.
-    const int max_chunks = max_corpse_chunks(corpse.mon_type);
-    int duration = 1 + max_chunks / 3;
-    duration = stepdown_value(duration, 6, 6, 12, 12);
-
-    // Get some nutrition right away, in case we're interrupted.
-    // (-1 for the starting message.)
-    vampire_nutrition_per_turn(corpse, -1);
-
-    // The draining delay doesn't have a start action, and we only need
-    // the continue/finish messages if it takes longer than 1 turn.
-    start_delay(DELAY_FEED_VAMPIRE, duration, invent, slot);
-
-    return true;
 }
 
 static void _heal_from_food(int hp_amt)
